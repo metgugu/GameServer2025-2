@@ -1,0 +1,15 @@
+# C#/.NET
+## OS generated files
+[Bb]in/
+[Oo]bj/
+.vs/
+*.user
+*.suo
+
+## Build results
+[Dd]ebug/
+[Rr]elease/
+
+## IDE files
+*.sln.doc
+*.userprefs
