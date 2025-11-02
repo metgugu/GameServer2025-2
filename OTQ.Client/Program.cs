@@ -2,12 +2,13 @@
 using System.Text;
 
 // (한글 문제 해결 1) CP949(EUC-KR) 인코딩을 .NET에서 사용 가능하도록 등록
+// (chcp 65001을 사용할 것이므로 이 줄은 사실상 필요 없으나, 호환성을 위해 남겨둡니다.)
 Encoding.RegisterProvider(CodePagesEncodingProvider.Instance);
 
 // (입력 씹힘 방지 1) 콘솔에 동시 접근(출력/디버그)을 막기 위한 잠금 객체
 object consoleLock = new();
 
-// C# 프로그램이 터미널에 '출력'할 때는 UTF-8을 사용
+// C# 프로그램이 터미널에 '출력'할 때는 UTF-8을 사용하도록 강제
 Console.OutputEncoding = Encoding.UTF8;
 
 Console.WriteLine("Enter Server IP (default 127.0.0.1):");
@@ -41,13 +42,9 @@ try
     networkReader = new StreamReader(stream, Encoding.UTF8);
     networkWriter = new StreamWriter(stream, Encoding.UTF8) { AutoFlush = true };
     
-    // (한글 문제 해결 2) Windows 터미널(cmd/PowerShell)이 CP949(949번)로 입력을 보낸다고 가정하고,
-    // C#이 그에 맞춰 읽도록 설정. (chcp 65001 환경에서는 UTF-8로 변경해야 함)
-    // consoleInputReader = new StreamReader(Console.OpenStandardInput(), Encoding.GetEncoding(949));
-    
-    // (chcp 65001 테스트 성공 버전)
+    // (한글 문제 해결 2) 터미널이 UTF-8('chcp 65001' 모드)로 보낸다고 가정하고,
+    // C#도 UTF-8로 입력을 받도록 설정합니다.
     consoleInputReader = new StreamReader(Console.OpenStandardInput(), Encoding.UTF8);
-
 
     // 서버에 닉네임 전송
     await networkWriter.WriteLineAsync(nickname);

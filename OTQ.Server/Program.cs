@@ -110,6 +110,12 @@ async Task HandleClientAsync(Player player)
         Console.WriteLine($"Broadcasting: {joinMessage}"); 
         await BroadcastMessageAsync(joinMessage);
 
+        // 방장(호스트)에게만 본인이 방장임을 알리는 1:1 메시지 전송
+        if (player.IsHost)
+        {
+            await SendMessageToAsync(player, "[서버] 당신은 방장(호스트)입니다. 3~4명이 모이면 /start 를 입력하여 게임을 시작하세요.");
+        }
+
         // 2. 채팅 및 게임 로직 처리 루프
         // 이 루프는 클라이언트가 연결되어 있는 동안 계속 실행됩니다.
         while (player.Client.Connected)
