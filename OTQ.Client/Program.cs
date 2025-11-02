@@ -1,10 +1,13 @@
 ﻿using System.Net.Sockets;
 using System.Text;
 
-// [씹힘 방지 1] 콘솔에 동시 접근을 막기 위한 잠금(lock) 객체
+// (한글 문제 해결 1) CP949(EUC-KR) 인코딩을 .NET에서 사용 가능하도록 등록
+Encoding.RegisterProvider(CodePagesEncodingProvider.Instance);
+
+// (입력 씹힘 방지 1) 콘솔에 동시 접근(출력/디버그)을 막기 위한 잠금 객체
 object consoleLock = new();
 
-// [한글 패치 1] C#은 무조건 UTF-8만 사용하도록 고정
+// C# 프로그램이 터미널에 '출력'할 때는 UTF-8을 사용
 Console.OutputEncoding = Encoding.UTF8;
 
 Console.WriteLine("Enter Server IP (default 127.0.0.1):");
@@ -23,9 +26,9 @@ while (string.IsNullOrWhiteSpace(nickname))
 }
 
 TcpClient client = new TcpClient();
-StreamReader? networkReader = null; 
-StreamWriter? networkWriter = null; 
-StreamReader? consoleInputReader = null; 
+StreamReader? networkReader = null; // 서버로부터 읽기
+StreamWriter? networkWriter = null; // 서버로 쓰기
+StreamReader? consoleInputReader = null; // 사용자 키보드로부터 읽기
 
 try
 {
@@ -33,17 +36,27 @@ try
     Console.WriteLine("Connected to server! (Type 'exit' to quit)");
 
     NetworkStream stream = client.GetStream();
+    
+    // 네트워크 통신은 항상 UTF-8로 통일
     networkReader = new StreamReader(stream, Encoding.UTF8);
     networkWriter = new StreamWriter(stream, Encoding.UTF8) { AutoFlush = true };
     
-    // [한글 패치 2] 콘솔 입력도 UTF-8로 읽도록 고정
+    // (한글 문제 해결 2) Windows 터미널(cmd/PowerShell)이 CP949(949번)로 입력을 보낸다고 가정하고,
+    // C#이 그에 맞춰 읽도록 설정. (chcp 65001 환경에서는 UTF-8로 변경해야 함)
+    // consoleInputReader = new StreamReader(Console.OpenStandardInput(), Encoding.GetEncoding(949));
+    
+    // (chcp 65001 테스트 성공 버전)
     consoleInputReader = new StreamReader(Console.OpenStandardInput(), Encoding.UTF8);
 
+
+    // 서버에 닉네임 전송
     await networkWriter.WriteLineAsync(nickname);
 
+    // '메시지 수신'과 '메시지 전송' 작업을 동시에 비동기로 실행
     Task receiverTask = ReceiveMessagesAsync(networkReader);
     Task senderTask = SendMessagesAsync(networkWriter, client, consoleInputReader);
 
+    // 둘 중 하나라도 끝나면 프로그램 종료 (예: 서버가 끊기거나, 사용자가 exit 입력)
     await Task.WhenAny(receiverTask, senderTask);
 }
 catch (Exception ex)
@@ -52,12 +65,16 @@ catch (Exception ex)
 }
 finally
 {
+    // 프로그램 종료 시 모든 리소스 정리
     client.Close();
     networkReader?.Close();
     networkWriter?.Close();
     consoleInputReader?.Close(); 
 }
 
+/// <summary>
+/// 서버로부터 메시지를 '수신'하는 작업 전용 루프
+/// </summary>
 async Task ReceiveMessagesAsync(StreamReader networkReader)
 {
     try
@@ -67,6 +84,7 @@ async Task ReceiveMessagesAsync(StreamReader networkReader)
             string? message = await networkReader.ReadLineAsync();
             if (message == null)
             {
+                // 다른 스레드가 콘솔에 출력하는 것을 방지 (입력 씹힘 개선)
                 lock (consoleLock)
                 {
                     Console.WriteLine("Server disconnected.");
@@ -74,6 +92,7 @@ async Task ReceiveMessagesAsync(StreamReader networkReader)
                 break;
             }
             
+            // 다른 스레드가 콘솔에 출력하는 것을 방지 (입력 씹힘 개선)
             lock (consoleLock)
             {
                 Console.WriteLine(message); 
@@ -89,16 +108,21 @@ async Task ReceiveMessagesAsync(StreamReader networkReader)
     }
 }
 
+/// <summary>
+/// 사용자 키보드 입력을 서버로 '전송'하는 작업 전용 루프
+/// </summary>
 async Task SendMessagesAsync(StreamWriter writer, TcpClient client, StreamReader consoleInputReader)
 {
     try
     {
         while (client.Connected)
         {
+            // 한글 처리가 설정된 'consoleInputReader'로부터 입력을 받음
             string? message = await consoleInputReader.ReadLineAsync(); 
 
             if (string.IsNullOrWhiteSpace(message)) continue;
 
+            // (입력 씹힘 개선) DEBUG 출력도 lock 안에서 처리
             lock (consoleLock)
             {
                 Console.WriteLine($"[DEBUG] Sending: {message}");
@@ -106,9 +130,10 @@ async Task SendMessagesAsync(StreamWriter writer, TcpClient client, StreamReader
 
             if (message.ToLower() == "exit")
             {
-                break; 
+                break; // 이 루프를 종료하면 프로그램이 종료됨
             }
         
+            // 서버로 메시지 전송
             await writer.WriteLineAsync(message);
         }
     }
