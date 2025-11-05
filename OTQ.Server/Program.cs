@@ -55,9 +55,12 @@ int currentReplyIndex = 0;
 int currentGogaeNumber = 1; 
 // ---------------
 
-Console.WriteLine("Starting server on 127.0.0.1:9000...");
-TcpListener listener = new TcpListener(IPAddress.Parse("127.0.0.1"), 9000);
+Console.WriteLine("Starting server...");
+// "127.0.0.1" (localhost) 대신 "IPAddress.Any" (모든 네트워크)로 변경
+TcpListener listener = new TcpListener(IPAddress.Any, 9000);
 listener.Start();
+// 서버가 어떤 IP에서 수신 대기 중인지 명확하게 표시 (예: 0.0.0.0:9000)
+Console.WriteLine($"Server started. Listening on {listener.LocalEndpoint}...");
 
 /// <summary>
 /// 서버 메인 루프. 새로운 클라이언트의 접속을 계속 기다립니다.
@@ -575,6 +578,7 @@ async Task HandleGuessInputAsync(Player player, string message)
 
 /// <summary>
 /// 턴을 종료하고, 기획안의 "연속 정답" 규칙에 따라 점수를 계산합니다.
+/// (새로운 점수 규칙 적용됨)
 /// </summary>
 async Task EndTurnAndCalculateScoresAsync()
 {
@@ -586,27 +590,31 @@ async Task EndTurnAndCalculateScoresAsync()
     
     // (플레이어, 획득 점수)
     Dictionary<Player, int> turnScores = new Dictionary<Player, int>();
-    int bestGogae = 0; // 출제자 점수 계산용 (0 = 아무도 못 맞힘)
+    int maxGuesserContinuousRounds = 0; // 출제자 점수 계산을 위한 '최고 응시자 연속 라운드 수'
 
     await BroadcastMessageAsync("---------- [턴 결과] ----------");
 
-    // 1. 추리자 점수 계산
+    // 1. 응시자 점수 계산
     foreach (Player guesser in guessers)
     {
-        int correctGogae = CalculateGuesserScore(guesser, currentAnswer.ToLower());
-        int score = GetScoreFromGogae(correctGogae);
+        // 수정된 CalculateGuesserContinuousRounds 함수를 호출하여 연속 유지 라운드 수를 얻습니다.
+        int continuousRounds = CalculateGuesserContinuousRounds(guesser, currentAnswer.ToLower());
+        
+        // 규칙: 본인이 정답을 마지막 라운드로부터 연속 유지한 라운드 수 * 2점
+        int score = continuousRounds * 2;
         
         guesser.TotalScore += score;
         turnScores[guesser] = score;
 
         string resultMessage;
-        if (correctGogae > 0)
+        if (continuousRounds > 0)
         {
-            resultMessage = $"[결과] {guesser.Nickname}: {correctGogae}고개에서 정답! (+{score}점, 총 {guesser.TotalScore}점)";
-            // 출제자 점수를 위한 최고 기록 갱신 (더 낮은 고개 = 더 좋은 기록)
-            if (correctGogae < bestGogae || bestGogae == 0)
+            resultMessage = $"[결과] {guesser.Nickname}: 마지막 라운드로부터 {continuousRounds}라운드 연속 정답 유지! (+{score}점, 총 {guesser.TotalScore}점)";
+            
+            // 출제자 점수를 위한 최고 기록 갱신
+            if (continuousRounds > maxGuesserContinuousRounds)
             {
-                bestGogae = correctGogae;
+                maxGuesserContinuousRounds = continuousRounds;
             }
         }
         else
@@ -617,12 +625,13 @@ async Task EndTurnAndCalculateScoresAsync()
         Console.WriteLine(resultMessage);
     }
     
-    // 2. 출제자 점수 계산 (추리자 중 가장 좋은 점수 획득)
-    int presenterScore = GetScoreFromGogae(bestGogae);
+    // 2. 출제자 점수 계산
+    // 규칙: 응시자 중 가장 오래 연속 유지한 라운드 수 * 1점
+    int presenterScore = maxGuesserContinuousRounds * 1;
     presenter.TotalScore += presenterScore;
     turnScores[presenter] = presenterScore;
     
-    string presenterResult = $"[결과] {presenter.Nickname} (출제자): 점수 획득! (+{presenterScore}점, 총 {presenter.TotalScore}점)";
+    string presenterResult = $"[결과] {presenter.Nickname} (출제자): 응시자 최고 기록 ({maxGuesserContinuousRounds}라운드 유지) 달성! (+{presenterScore}점, 총 {presenter.TotalScore}점)";
     await BroadcastMessageAsync(presenterResult);
     Console.WriteLine(presenterResult);
     
@@ -644,44 +653,30 @@ async Task EndTurnAndCalculateScoresAsync()
 
 /// <summary>
 /// 기획안의 "연속 정답" 규칙을 계산합니다.
-/// (예: "x-x-apple-apple-apple" -> 3고개부터 맞힘)
+/// 응시자가 마지막 라운드로부터 몇 라운드 연속 정답을 유지했는지 반환합니다.
+/// (예: "x-x-apple-apple-apple" -> 3라운드 연속 유지)
+/// (새로운 점수 규칙 적용됨)
 /// </summary>
-/// <returns>연속 정답이 시작된 고개 번호 (1-5). 못 맞히면 0.</returns>
-int CalculateGuesserScore(Player guesser, string correctAnswer)
+/// <returns>마지막 라운드로부터 연속 정답을 유지한 라운드 수 (0-5). 못 맞히면 0.</returns>
+int CalculateGuesserContinuousRounds(Player guesser, string correctAnswer)
 {
-    int firstCorrectGogae = 0; // 0 = 맞힌 적 없음
+    int continuousCount = 0;
     
-    // 5고개(index 4)부터 1고개(index 0)까지 역순으로 검사
+    // 마지막 라운드(인덱스 4)부터 시작하여 역순으로 검사합니다.
     for (int i = 4; i >= 0; i--)
     {
+        // 해당 라운드에 추측을 제출했고, 그 추측이 정답과 같으면
         if (guesser.Guesses.Count > i && guesser.Guesses[i] == correctAnswer)
         {
-            // "연속"이므로 '최초 정답 고개'를 갱신
-            firstCorrectGogae = i + 1; // (1-based gogae number)
+            continuousCount++; // 연속 카운트 증가
         }
         else
         {
-            // "연속"이 끊김! (예: "apple"이 아닌 "x"를 만남)
+            // 정답이 아니거나, 추측을 제출하지 않았으면 연속이 끊긴 것이므로 반복을 중단합니다.
             break; 
         }
     }
-    return firstCorrectGogae;
-}
-
-/// <summary>
-/// 고개 번호에 따른 점수표
-/// </summary>
-int GetScoreFromGogae(int gogae)
-{
-    switch (gogae)
-    {
-        case 1: return 50; // 1고개
-        case 2: return 40; // 2고개
-        case 3: return 30; // 3고개
-        case 4: return 20; // 4고개
-        case 5: return 10; // 5고개
-        default: return 0; // 못 맞힘 (0)
-    }
+    return continuousCount;
 }
 
 /// <summary>
