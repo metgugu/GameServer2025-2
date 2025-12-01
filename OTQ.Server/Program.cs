@@ -3,12 +3,12 @@ using System.Net.Sockets;
 using System.Text;
 using System.Linq; 
 
-// Windows 터미널에서 한글 입력을 올바르게 처리하기 위해 UTF-8을 기본으로 설정합니다.
+// 콘솔 입출력 인코딩을 UTF-8로 강제 설정 (한글 깨짐 방지)
 Console.OutputEncoding = Encoding.UTF8;
 Console.InputEncoding = Encoding.UTF8;
 
 // ==================================================================================
-// [전역 변수] 서버의 상태 및 데이터 관리
+// [전역 변수]
 // ==================================================================================
 
 List<Player> players = new List<Player>();
@@ -43,6 +43,7 @@ while (true)
 
     Console.WriteLine("Client connected, waiting for nickname...");
     
+    // 첫 번째로 들어온 사람(Count==0)이 방장
     Player newPlayer = new Player(client, players.Count == 0); 
     players.Add(newPlayer);
     
@@ -72,7 +73,7 @@ async Task HandleClientAsync(Player player)
 
         if (player.IsHost)
         {
-            await SendMessageToAsync(player, "[서버] 당신은 방장(호스트)입니다. 3~4명이 모이면 /start 를 입력하여 게임을 시작하세요.");
+            await SendMessageToAsync(player, "[서버] 당신은 방장입니다. 3~4명이 모이면 '/게임시작'을 입력하여 게임을 시작하세요.");
         }
         else
         {
@@ -115,14 +116,69 @@ async Task HandleClientAsync(Player player)
     }
     finally
     {
+        // -----------------------------------------------------------
+        // [수정됨] 플레이어 퇴장 및 게임 강제 종료 로직
+        // -----------------------------------------------------------
         players.Remove(player);
         player.Client.Close();
         Console.WriteLine($"Player {player.Nickname} disconnected.");
         
         string leaveMessage = $"[서버] {player.Nickname}님이 퇴장했습니다.";
-        Console.WriteLine($"Broadcasting: {leaveMessage}"); 
         await BroadcastMessageAsync(leaveMessage);
+
+        // 1. 게임 진행 중에 나갔다면 -> 게임 강제 종료 및 리셋
+        if (isGameRunning)
+        {
+            await BroadcastMessageAsync("[서버] 🚨 플레이어 이탈로 인해 게임을 강제 종료하고 로비로 돌아갑니다.");
+            ResetGameData(); // 게임 데이터 초기화 함수 호출
+        }
+
+        // 2. 나간 사람이 방장이었다면 -> 다음 사람에게 방장 승계
+        if (player.IsHost && players.Count > 0)
+        {
+            Player newHost = players[0];
+            newHost.IsHost = true;
+            await SendMessageToAsync(newHost, "[서버] 👑 이전 방장이 퇴장하여 당신이 새로운 방장이 되었습니다! (/게임시작 가능)");
+            await BroadcastMessageAsync($"[서버] {newHost.Nickname}님이 새로운 방장이 되었습니다.");
+        }
     }
+}
+
+// ----------------------------------------------------------------------
+// [헬퍼 함수] 게임 데이터 리셋 (로비로 복귀)
+// ----------------------------------------------------------------------
+void ResetGameData()
+{
+    isGameRunning = false;
+    currentGameState = GameState.Lobby;
+    currentTurnIndex = 0;
+    currentAnswer = "";
+    currentGogaeNumber = 1;
+    currentGogaeData.Clear();
+    questionAskers.Clear();
+    currentReplyIndex = 0;
+
+    foreach (var p in players)
+    {
+        p.TotalScore = 0;
+        p.Guesses.Clear();
+        p.AvailableChoices.Clear();
+        p.ChosenQuestion = null;
+    }
+}
+
+// ----------------------------------------------------------------------
+// [헬퍼 함수] 채팅인지 명령어인지 판별
+// ----------------------------------------------------------------------
+bool IsCommand(string message, out string content)
+{
+    if (message.StartsWith("/"))
+    {
+        content = message.Substring(1).Trim();
+        return true;
+    }
+    content = message;
+    return false;
 }
 
 // ==================================================================================
@@ -131,19 +187,19 @@ async Task HandleClientAsync(Player player)
 
 async Task HandleLobbyMessageAsync(Player player, string message)
 {
-    if (message.ToLower() == "/start")
+    if (message.Trim() == "/게임시작")
     {
         if (!player.IsHost)
         {
-            await SendMessageToAsync(player, "[서버] 방장(호스트)만 게임을 시작할 수 있습니다.");
+            await SendMessageToAsync(player, "[서버] 방장만 게임을 시작할 수 있습니다.");
         }
         else if (players.Count < 3) 
         {
-            await SendMessageToAsync(player, $"[서버] 최소 3명의 플레이어가 필요합니다. (현재 {players.Count}명)");
+            await SendMessageToAsync(player, $"[서버] 최소 3명이 필요합니다. (현재 {players.Count}명)");
         }
         else if (players.Count > 4)
         {
-            await SendMessageToAsync(player, $"[서버] 최대 4명의 플레이어만 가능합니다. (현재 {players.Count}명)");
+            await SendMessageToAsync(player, $"[서버] 최대 4명만 가능합니다. (현재 {players.Count}명)");
         }
         else
         {
@@ -151,10 +207,10 @@ async Task HandleLobbyMessageAsync(Player player, string message)
             currentGameState = GameState.WaitingForAnswer; 
             currentTurnIndex = 0; 
             
+            // 점수 초기화
             foreach(var p in players) { p.TotalScore = 0; }
 
             string startMessage = $"[서버] 게임을 시작합니다! (총 {players.Count}명)";
-            Console.WriteLine($"Broadcasting: {startMessage}");
             await BroadcastMessageAsync(startMessage);
             
             await StartTurnAsync(); 
@@ -179,29 +235,31 @@ async Task StartTurnAsync()
         p.ChosenQuestion = null;
     }
     
-    string turnMessage = $"[서버] {currentTurnIndex + 1}번째 턴을 시작합니다. 이번 출제자는 [ {questionSetter.Nickname} ]님입니다.";
-    Console.WriteLine($"Broadcasting: {turnMessage}");
+    string turnMessage = $"[서버] {currentTurnIndex + 1}번째 턴을 시작합니다. 출제자: [ {questionSetter.Nickname} ]";
     await BroadcastMessageAsync(turnMessage);
 
-    // [수정됨] 영어 입력 요청 삭제
-    await SendMessageToAsync(questionSetter, "[서버] 당신은 출제자입니다. 정답을 입력하세요: ");
+    await SendMessageToAsync(questionSetter, "[서버] 당신은 출제자입니다. 정답을 입력할 때 앞에 '/'를 붙여주세요. (예: /사과)");
 }
 
 async Task HandleAnswerInputAsync(Player player, string message)
 {
     Player questionSetter = players[currentTurnIndex];
 
-    if (player == questionSetter)
+    if (player != questionSetter)
     {
-        currentAnswer = message.Trim();
+        await BroadcastMessageAsync($"[{player.Nickname}]: {message}");
+        return;
+    }
+
+    if (IsCommand(message, out string content))
+    {
+        currentAnswer = content;
         Console.WriteLine($"[게임 로그] 정답 설정: {currentAnswer}");
 
         await SendMessageToAsync(player, $"[서버] 정답이 '{currentAnswer}'(으)로 설정되었습니다.");
         
         currentGogaeNumber = 1; 
-        
-        string notice = $"[서버] 출제자가 정답을 설정했습니다. {currentGogaeNumber}번째 고개를 시작합니다.";
-        Console.WriteLine($"Broadcasting: {notice}");
+        string notice = $"[서버] 정답 설정 완료! {currentGogaeNumber}번째 고개를 시작합니다.";
         await BroadcastMessageAsync(notice);
 
         currentGogaeData.Clear(); 
@@ -209,14 +267,13 @@ async Task HandleAnswerInputAsync(Player player, string message)
         
         currentGameState = GameState.WaitingForQuestions; 
         
-        // [수정됨] 영어 입력 요청 삭제
-        string nextStepNotice = "[서버] 이제부터 출제자를 제외한 모든 플레이어는 '질문'을 입력해주세요. (한 사람당 1개)";
-        Console.WriteLine($"Broadcasting: {nextStepNotice}");
+        string nextStepNotice = "[서버] 출제자를 제외한 플레이어는 질문을 입력해주세요. (명령어: /질문내용)";
         await BroadcastMessageAsync(nextStepNotice);
     }
     else
     {
-        await SendMessageToAsync(player, "[서버] 지금은 출제자가 정답을 입력할 차례입니다. 잠시만 기다려주세요.");
+        await BroadcastMessageAsync($"[{player.Nickname}]: {message}");
+        await SendMessageToAsync(player, "(팁: 정답을 설정하려면 '/정답' 처럼 앞에 슬래시를 붙이세요.)");
     }
 }
 
@@ -226,39 +283,47 @@ async Task HandleQuestionInputAsync(Player player, string message)
 
     if (player == questionSetter)
     {
-        await SendMessageToAsync(player, "[서버] 당신은 출제자입니다. 다른 플레이어들이 질문을 입력할 때까지 기다려주세요.");
+        await BroadcastMessageAsync($"[{player.Nickname}]: {message}");
         return;
     }
     
     if (currentGogaeData.ContainsKey(player))
     {
-        await SendMessageToAsync(player, "[서버] 이미 이번 고개에 질문을 제출했습니다. 답변을 기다려주세요.");
+        await BroadcastMessageAsync($"[{player.Nickname}]: {message}");
         return;
     }
 
-    currentGogaeData.Add(player, (message, "")); 
-    questionAskers.Add(player); 
-    
-    Console.WriteLine($"[게임 로그] {player.Nickname} 질문 등록: {message}");
-    await SendMessageToAsync(player, "[서버] 질문이 등록되었습니다.");
-
-    int requiredQuestions = players.Count - 1; 
-    int currentQuestions = currentGogaeData.Count;
-
-    if (currentQuestions == requiredQuestions)
+    if (IsCommand(message, out string content))
     {
-        Console.WriteLine("[게임 로그] 모든 질문 수집 완료.");
-        await BroadcastMessageAsync("[서버] 모든 플레이어의 질문이 등록되었습니다. 출제자가 답변할 차례입니다.");
+        currentGogaeData.Add(player, (content, "")); 
+        questionAskers.Add(player); 
         
-        currentReplyIndex = 0; 
-        currentGameState = GameState.WaitingForReplies;
-        
-        await AskForNextReplyAsync(); 
+        Console.WriteLine($"[게임 로그] {player.Nickname} 질문 등록: {content}");
+        await SendMessageToAsync(player, "[서버] 질문이 등록되었습니다.");
+
+        int requiredQuestions = players.Count - 1; 
+        int currentQuestions = currentGogaeData.Count;
+
+        if (currentQuestions == requiredQuestions)
+        {
+            Console.WriteLine("[게임 로그] 모든 질문 수집 완료.");
+            await BroadcastMessageAsync("[서버] 모든 질문 등록 완료! 출제자가 답변할 차례입니다.");
+            
+            currentReplyIndex = 0; 
+            currentGameState = GameState.WaitingForReplies;
+            
+            await AskForNextReplyAsync(); 
+        }
+        else
+        {
+            int remaining = requiredQuestions - currentQuestions;
+            await BroadcastMessageAsync($"[서버] 남은 질문: {remaining}개");
+        }
     }
     else
     {
-        int remaining = requiredQuestions - currentQuestions;
-        await BroadcastMessageAsync($"[서버] 남은 질문: {remaining}개");
+        await BroadcastMessageAsync($"[{player.Nickname}]: {message}");
+        await SendMessageToAsync(player, "(팁: 질문을 등록하려면 '/질문내용' 처럼 앞에 슬래시를 붙이세요.)");
     }
 }
 
@@ -270,13 +335,9 @@ async Task AskForNextReplyAsync()
 
     await SendMessageToAsync(presenter, $"---------- [질문 {currentReplyIndex + 1}/{questionAskers.Count}] ----------");
     await SendMessageToAsync(presenter, $"-> [{asker.Nickname}]: {question}");
-    
-    // [수정됨] 예/아니오 답변 요청
-    await SendMessageToAsync(presenter, "[서버] '예' 또는 '아니오'로 답변하세요.");
+    await SendMessageToAsync(presenter, "[서버] 답변을 입력하세요. (명령어: /예 또는 /아니오)");
 
     string waitMessage = $"[서버] 출제자가 [ {asker.Nickname} ]님의 질문에 답변하는 중입니다...";
-    Console.WriteLine($"Broadcasting: {waitMessage}");
-    
     foreach (Player p in players.Where(p => p != presenter))
     {
         await SendMessageToAsync(p, waitMessage);
@@ -289,65 +350,71 @@ async Task HandleReplyInputAsync(Player player, string message)
 
     if (player != presenter)
     {
-        await SendMessageToAsync(player, "[서버] 지금은 출제자가 질문에 답변하는 중입니다. 잠시만 기다려주세요.");
+        await BroadcastMessageAsync($"[{player.Nickname}]: {message}");
         return;
     }
 
-    // [수정됨] 한글 '예/아니오' 및 영어 'y/n' 모두 허용 로직
-    string input = message.Trim().ToLower(); 
-    bool isYes = (input == "예" || input == "y" || input == "yes" || input == "ㅇㅇ");
-    bool isNo = (input == "아니오" || input == "아니요" || input == "n" || input == "no" || input == "ㄴㄴ");
-
-    if (!isYes && !isNo)
+    if (IsCommand(message, out string content))
     {
-        await SendMessageToAsync(presenter, "[서버] 잘못된 입력입니다. '예' 또는 '아니오'로 답변해주세요.");
-        return;
-    }
-    
-    string reply = isYes ? "예" : "아니오"; // 저장할 땐 통일된 한글로 저장
-    Player asker = questionAskers[currentReplyIndex]; 
-    currentGogaeData[asker] = (currentGogaeData[asker].Question, reply); 
-    
-    Console.WriteLine($"[게임 로그] 답변 저장: {reply}");
-    await SendMessageToAsync(presenter, $"[서버] '{reply}'(으)로 답변이 저장되었습니다.");
+        string input = content.ToLower(); 
+        bool isYes = (input == "예" || input == "y" || input == "yes" || input == "ㅇㅇ");
+        bool isNo = (input == "아니오" || input == "아니요" || input == "n" || input == "no" || input == "ㄴㄴ");
 
-    currentReplyIndex++;
+        if (!isYes && !isNo)
+        {
+            await SendMessageToAsync(presenter, "[서버] 잘못된 입력입니다. '/예' 또는 '/아니오'로 답변해주세요.");
+            return;
+        }
+        
+        string reply = isYes ? "예" : "아니오"; 
+        Player asker = questionAskers[currentReplyIndex]; 
+        currentGogaeData[asker] = (currentGogaeData[asker].Question, reply); 
+        
+        Console.WriteLine($"[게임 로그] 답변 저장: {reply}");
+        await SendMessageToAsync(presenter, $"[서버] '{reply}'(으)로 답변이 저장되었습니다.");
 
-    if (currentReplyIndex < questionAskers.Count)
-    {
-        await AskForNextReplyAsync();
+        currentReplyIndex++;
+
+        if (currentReplyIndex < questionAskers.Count)
+        {
+            await AskForNextReplyAsync();
+        }
+        else
+        {
+            Console.WriteLine("[게임 로그] 모든 답변 수집 완료.");
+            await BroadcastMessageAsync("[서버] 답변 완료! 이제 힌트를 선택할 차례입니다.");
+            
+            currentGameState = GameState.WaitingForChoice; 
+            Player questionSetter = players[currentTurnIndex];
+            
+            foreach (Player askerPlayer in questionAskers)
+            {
+                var myData = currentGogaeData[askerPlayer];
+                await SendMessageToAsync(askerPlayer, "---------- [힌트 선택] ----------");
+                await SendMessageToAsync(askerPlayer, $"[내 질문] [{askerPlayer.Nickname}]: {myData.Question} -> ({myData.Reply})");
+                await SendMessageToAsync(askerPlayer, "[서버] 추가로 확인할 질문의 번호를 입력하세요. (명령어: /1, /2 등)");
+
+                var otherAskers = questionAskers.Where(p => p != askerPlayer).ToList();
+                askerPlayer.AvailableChoices = otherAskers;
+                
+                for (int i = 0; i < otherAskers.Count; i++)
+                {
+                    var otherAsker = otherAskers[i];
+                    var otherData = currentGogaeData[otherAsker];
+                    await SendMessageToAsync(askerPlayer, $"{i + 1}. [{otherAsker.Nickname}]: {otherData.Question}");
+                }
+                await SendMessageToAsync(askerPlayer, "---------------------------------");
+                
+                askerPlayer.ChosenQuestion = null;
+            }
+            
+            await SendMessageToAsync(questionSetter, "[서버] 플레이어들이 힌트를 선택 중입니다...");
+        }
     }
     else
     {
-        Console.WriteLine("[게임 로그] 모든 답변 수집 완료.");
-        await BroadcastMessageAsync("[서버] 출제자가 모든 질문에 답변했습니다! 이제 힌트를 선택할 차례입니다.");
-        
-        currentGameState = GameState.WaitingForChoice; 
-        Player questionSetter = players[currentTurnIndex];
-        
-        foreach (Player askerPlayer in questionAskers)
-        {
-            var myData = currentGogaeData[askerPlayer];
-            await SendMessageToAsync(askerPlayer, "---------- [힌트 선택] ----------");
-            await SendMessageToAsync(askerPlayer, $"[내 질문] [{askerPlayer.Nickname}]: {myData.Question} -> ({myData.Reply})");
-            await SendMessageToAsync(askerPlayer, "[서버] 아래에서 추가로 확인할 질문 1개를 숫자로 선택하세요.");
-
-            var otherAskers = questionAskers.Where(p => p != askerPlayer).ToList();
-            askerPlayer.AvailableChoices = otherAskers;
-            
-            for (int i = 0; i < otherAskers.Count; i++)
-            {
-                var otherAsker = otherAskers[i];
-                var otherData = currentGogaeData[otherAsker];
-                await SendMessageToAsync(askerPlayer, $"{i + 1}. [{otherAsker.Nickname}]: {otherData.Question}");
-            }
-            await SendMessageToAsync(askerPlayer, "---------------------------------");
-            await SendMessageToAsync(askerPlayer, $"숫자(1~{otherAskers.Count})를 입력하세요: ");
-            
-            askerPlayer.ChosenQuestion = null;
-        }
-        
-        await SendMessageToAsync(questionSetter, "[서버] 플레이어들이 힌트를 선택 중입니다. 잠시만 기다려주세요...");
+        await BroadcastMessageAsync($"[{player.Nickname}]: {message}");
+        await SendMessageToAsync(player, "(팁: 답변하려면 '/예' 또는 '/아니오' 처럼 앞에 슬래시를 붙이세요.)");
     }
 }
 
@@ -357,54 +424,61 @@ async Task HandleChoiceInputAsync(Player player, string message)
 
     if (player == presenter || !questionAskers.Contains(player))
     {
-        await SendMessageToAsync(player, "[서버] 지금은 힌트를 선택할 차례가 아닙니다.");
+        await BroadcastMessageAsync($"[{player.Nickname}]: {message}");
         return;
     }
     
     if (player.ChosenQuestion != null)
     {
-        await SendMessageToAsync(player, "[서버] 이미 힌트 선택을 완료했습니다.");
+        await BroadcastMessageAsync($"[{player.Nickname}]: {message}");
         return;
     }
 
-    if (!int.TryParse(message, out int choiceIndex) || choiceIndex < 1 || choiceIndex > player.AvailableChoices.Count)
+    if (IsCommand(message, out string content))
     {
-        await SendMessageToAsync(player, $"[서버] 잘못된 입력입니다. 1부터 {player.AvailableChoices.Count} 사이의 숫자를 입력하세요.");
-        return;
-    }
-    
-    Player chosenAsker = player.AvailableChoices[choiceIndex - 1]; 
-    player.ChosenQuestion = chosenAsker; 
-    
-    Console.WriteLine($"[게임 로그] {player.Nickname}가 {chosenAsker.Nickname} 선택");
-    await SendMessageToAsync(player, "[서버] 힌트 선택이 완료되었습니다. 대기 중...");
-
-    int requiredChoices = players.Count - 1;
-    int currentChoices = questionAskers.Count(p => p.ChosenQuestion != null);
-
-    if (currentChoices == requiredChoices)
-    {
-        Console.WriteLine("[게임 로그] 힌트 선택 완료.");
-        currentGameState = GameState.WaitingForGuesses;
-        
-        await BroadcastMessageAsync("[서버] 모든 플레이어가 힌트 선택을 완료했습니다!");
-
-        foreach (Player askerPlayer in questionAskers)
+        if (!int.TryParse(content, out int choiceIndex) || choiceIndex < 1 || choiceIndex > player.AvailableChoices.Count)
         {
-            var myData = currentGogaeData[askerPlayer];
-            Player selectedAsker = askerPlayer.ChosenQuestion!; 
-            var chosenData = currentGogaeData[selectedAsker];
-            
-            await SendMessageToAsync(askerPlayer, "---------- [최종 힌트] ----------");
-            await SendMessageToAsync(askerPlayer, $"[내 질문] [{askerPlayer.Nickname}]: {myData.Question} -> ({myData.Reply})");
-            await SendMessageToAsync(askerPlayer, $"[선택 질문] [{selectedAsker.Nickname}]: {chosenData.Question} -> ({chosenData.Reply})");
-            await SendMessageToAsync(askerPlayer, "---------------------------------");
-            
-            // [수정됨] 영어 입력 요청 삭제
-            await SendMessageToAsync(askerPlayer, $"[서버] {currentGogaeNumber}번째 고개의 정답을 입력하세요.");
+            await SendMessageToAsync(player, $"[서버] 잘못된 번호입니다. 1~{player.AvailableChoices.Count} 사이의 숫자를 '/1' 처럼 입력하세요.");
+            return;
         }
         
-        await SendMessageToAsync(presenter, "[서버] 플레이어들이 정답을 추측 중입니다...");
+        Player chosenAsker = player.AvailableChoices[choiceIndex - 1]; 
+        player.ChosenQuestion = chosenAsker; 
+        
+        Console.WriteLine($"[게임 로그] {player.Nickname}가 {chosenAsker.Nickname} 선택");
+        await SendMessageToAsync(player, "[서버] 힌트 선택 완료. 대기 중...");
+
+        int requiredChoices = players.Count - 1;
+        int currentChoices = questionAskers.Count(p => p.ChosenQuestion != null);
+
+        if (currentChoices == requiredChoices)
+        {
+            Console.WriteLine("[게임 로그] 힌트 선택 완료.");
+            currentGameState = GameState.WaitingForGuesses;
+            
+            await BroadcastMessageAsync("[서버] 힌트 선택 완료! 정답 유추 단계입니다.");
+
+            foreach (Player askerPlayer in questionAskers)
+            {
+                var myData = currentGogaeData[askerPlayer];
+                Player selectedAsker = askerPlayer.ChosenQuestion!; 
+                var chosenData = currentGogaeData[selectedAsker];
+                
+                await SendMessageToAsync(askerPlayer, "---------- [최종 힌트] ----------");
+                await SendMessageToAsync(askerPlayer, $"[내 질문] [{askerPlayer.Nickname}]: {myData.Question} -> ({myData.Reply})");
+                await SendMessageToAsync(askerPlayer, $"[선택 질문] [{selectedAsker.Nickname}]: {chosenData.Question} -> ({chosenData.Reply})");
+                await SendMessageToAsync(askerPlayer, "---------------------------------");
+                
+                await SendMessageToAsync(askerPlayer, $"[서버] {currentGogaeNumber}번째 고개의 정답을 추측하세요. (명령어: /정답내용)");
+            }
+            
+            await SendMessageToAsync(presenter, "[서버] 플레이어들이 정답을 추측 중입니다...");
+        }
+    }
+    else
+    {
+        await BroadcastMessageAsync($"[{player.Nickname}]: {message}");
+        await SendMessageToAsync(player, "(팁: 번호를 선택하려면 '/1' 처럼 앞에 슬래시를 붙이세요.)");
     }
 }
 
@@ -414,58 +488,65 @@ async Task HandleGuessInputAsync(Player player, string message)
 
     if (player == presenter || !questionAskers.Contains(player))
     {
-        await SendMessageToAsync(player, "[서버] 지금은 정답을 추측할 차례가 아닙니다.");
+        await BroadcastMessageAsync($"[{player.Nickname}]: {message}");
         return;
     }
 
     if (player.Guesses.Count == currentGogaeNumber)
     {
-        await SendMessageToAsync(player, "[서버] 이미 정답을 제출했습니다. 대기해주세요.");
+        await BroadcastMessageAsync($"[{player.Nickname}]: {message}");
         return;
     }
     
     if (player.Guesses.Count != currentGogaeNumber - 1)
     {
-        await SendMessageToAsync(player, "[서버] 오류: 이전 고개 기록 없음.");
+        await SendMessageToAsync(player, "[서버] 오류: 기록 불일치.");
         return;
     }
 
-    player.Guesses.Add(message.Trim().ToLower());
-    Console.WriteLine($"[게임 로그] {player.Nickname} 추측: {message}");
-    await SendMessageToAsync(player, "[서버] 정답 추측이 등록되었습니다.");
-
-    int requiredGuesses = players.Count - 1; 
-    int currentGuesses = questionAskers.Count(p => p.Guesses.Count == currentGogaeNumber);
-
-    if (currentGuesses == requiredGuesses)
+    if (IsCommand(message, out string content))
     {
-        Console.WriteLine($"[게임 로그] {currentGogaeNumber}고개 종료.");
-        
-        if (currentGogaeNumber < 5)
+        player.Guesses.Add(content.ToLower()); 
+        Console.WriteLine($"[게임 로그] {player.Nickname} 추측: {content}");
+        await SendMessageToAsync(player, "[서버] 정답 추측이 등록되었습니다.");
+
+        int requiredGuesses = players.Count - 1; 
+        int currentGuesses = questionAskers.Count(p => p.Guesses.Count == currentGogaeNumber);
+
+        if (currentGuesses == requiredGuesses)
         {
-            currentGogaeNumber++;
+            Console.WriteLine($"[게임 로그] {currentGogaeNumber}고개 종료.");
             
-            await BroadcastMessageAsync($"[서버] {currentGogaeNumber-1}고개가 종료되었습니다. {currentGogaeNumber}번째 고개를 시작합니다.");
-            
-            currentGogaeData.Clear(); 
-            questionAskers.Clear(); 
-            currentReplyIndex = 0;
-            foreach(var p in players.Where(p => p != presenter)) { 
-                p.AvailableChoices.Clear();
-                p.ChosenQuestion = null;
+            if (currentGogaeNumber < 5)
+            {
+                currentGogaeNumber++;
+                
+                await BroadcastMessageAsync($"[서버] {currentGogaeNumber-1}고개가 종료되었습니다. {currentGogaeNumber}번째 고개를 시작합니다.");
+                
+                currentGogaeData.Clear(); 
+                questionAskers.Clear(); 
+                currentReplyIndex = 0;
+                foreach(var p in players.Where(p => p != presenter)) { 
+                    p.AvailableChoices.Clear();
+                    p.ChosenQuestion = null;
+                }
+                
+                currentGameState = GameState.WaitingForQuestions; 
+                
+                string nextStepNotice = "[서버] 질문을 입력해주세요. (명령어: /질문내용)";
+                await BroadcastMessageAsync(nextStepNotice);
             }
-            
-            currentGameState = GameState.WaitingForQuestions; 
-            
-            // [수정됨] 영어 입력 요청 삭제
-            string nextStepNotice = "[서버] 이제부터 출제자를 제외한 모든 플레이어는 '질문'을 입력해주세요. (한 사람당 1개)";
-            await BroadcastMessageAsync(nextStepNotice);
+            else
+            {
+                Console.WriteLine($"[게임 로그] 5고개 종료.");
+                await EndTurnAndCalculateScoresAsync();
+            }
         }
-        else
-        {
-            Console.WriteLine($"[게임 로그] 5고개 종료.");
-            await EndTurnAndCalculateScoresAsync();
-        }
+    }
+    else
+    {
+        await BroadcastMessageAsync($"[{player.Nickname}]: {message}");
+        await SendMessageToAsync(player, "(팁: 정답을 제출하려면 '/정답' 처럼 앞에 슬래시를 붙이세요.)");
     }
 }
 
@@ -499,7 +580,6 @@ async Task EndTurnAndCalculateScoresAsync()
             resultMessage = $"[결과] {guesser.Nickname}: 실패 (+0점, 총 {guesser.TotalScore}점)";
         }
         await BroadcastMessageAsync(resultMessage);
-        Console.WriteLine(resultMessage);
     }
     
     int presenterScore = maxGuesserContinuousRounds * 1;
@@ -507,7 +587,6 @@ async Task EndTurnAndCalculateScoresAsync()
     
     string presenterResult = $"[결과] {presenter.Nickname} (출제자): 응시자 최고 기록 {maxGuesserContinuousRounds}라운드! (+{presenterScore}점, 총 {presenter.TotalScore}점)";
     await BroadcastMessageAsync(presenterResult);
-    Console.WriteLine(presenterResult);
     
     await BroadcastMessageAsync("---------------------------------");
     
@@ -527,7 +606,7 @@ int CalculateGuesserContinuousRounds(Player guesser, string correctAnswer)
     int continuousCount = 0;
     for (int i = 4; i >= 0; i--)
     {
-        if (guesser.Guesses.Count > i && guesser.Guesses[i] == correctAnswer)
+        if (guesser.Guesses.Count > i && guesser.Guesses[i].Trim().ToLower() == correctAnswer.Trim().ToLower())
         {
             continuousCount++; 
         }
@@ -542,7 +621,7 @@ int CalculateGuesserContinuousRounds(Player guesser, string correctAnswer)
 async Task StartNextTurnAsync()
 {
     Console.WriteLine($"[게임 로그] 다음 턴({currentTurnIndex + 1}) 시작.");
-    await BroadcastMessageAsync($"[서버] 모든 점수 계산이 완료되었습니다. {currentTurnIndex + 1}번째 턴을 시작합니다.");
+    await BroadcastMessageAsync($"[서버] {currentTurnIndex + 1}번째 턴을 시작합니다.");
 
     currentGogaeNumber = 1;
     currentGogaeData.Clear();
@@ -568,39 +647,26 @@ async Task EndGameAsync()
     }
     
     await BroadcastMessageAsync("---------------------------------");
-    await BroadcastMessageAsync("[서버] 3초 후 로비로 돌아갑니다...");
+    await BroadcastMessageAsync("[서버] 로비로 돌아갑니다. /게임시작으로 다시 시작하세요.");
     
-    await Task.Delay(3000); 
-
-    isGameRunning = false;
-    currentGameState = GameState.Lobby;
-    currentTurnIndex = 0;
-    currentAnswer = "";
-    currentGogaeNumber = 1;
-    currentGogaeData.Clear();
-    questionAskers.Clear();
-    
-    foreach(var p in players)
-    {
-        p.TotalScore = 0; 
-        p.Guesses.Clear();
-        p.AvailableChoices.Clear();
-        p.ChosenQuestion = null;
-    }
-    
-    await BroadcastMessageAsync("[서버] 로비로 돌아왔습니다. /start로 다시 시작하세요.");
+    // 게임 리셋 (로비 복귀)
+    ResetGameData();
     Console.WriteLine("[게임 로그] 로비 복귀.");
 }
 
 async Task BroadcastMessageAsync(string message)
 {
     byte[] buffer = Encoding.UTF8.GetBytes(message + Environment.NewLine);
-    foreach (Player p in players)
+    // 컬렉션 복사본을 사용하여 전송 중 players 변경(퇴장)에 안전하게 대비
+    foreach (Player p in players.ToList()) 
     {
         try
         {
-            NetworkStream stream = p.Client.GetStream();
-            await stream.WriteAsync(buffer, 0, buffer.Length);
+            if (p.Client.Connected)
+            {
+                NetworkStream stream = p.Client.GetStream();
+                await stream.WriteAsync(buffer, 0, buffer.Length);
+            }
         }
         catch (Exception ex)
         {
@@ -611,12 +677,14 @@ async Task BroadcastMessageAsync(string message)
 
 async Task SendMessageToAsync(Player player, string message)
 {
-    Console.WriteLine($"Sending to {player.Nickname}: {message}"); 
     byte[] buffer = Encoding.UTF8.GetBytes(message + Environment.NewLine);
     try
     {
-        NetworkStream stream = player.Client.GetStream();
-        await stream.WriteAsync(buffer, 0, buffer.Length);
+        if (player.Client.Connected)
+        {
+            NetworkStream stream = player.Client.GetStream();
+            await stream.WriteAsync(buffer, 0, buffer.Length);
+        }
     }
     catch (Exception ex)
     {
@@ -638,7 +706,8 @@ class Player
 {
     public TcpClient Client { get; }
     public string Nickname { get; set; }
-    public bool IsHost { get; } 
+    // [수정됨] IsHost를 set 가능하게 변경하여 방장 승계 기능 지원
+    public bool IsHost { get; set; } 
     public int TotalScore { get; set; } = 0;
     public List<string> Guesses { get; } = new List<string>();
     public List<Player> AvailableChoices { get; set; } = new List<Player>();
