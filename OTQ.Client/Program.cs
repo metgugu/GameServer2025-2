@@ -3,162 +3,157 @@ using System.Text;
 using System.Text.RegularExpressions; 
 using System.Linq; 
 
-// (한글 문제 해결 1) CP949(EUC-KR) 인코딩을 .NET에서 사용 가능하도록 등록
+// 한글 깨짐 방지
 Encoding.RegisterProvider(CodePagesEncodingProvider.Instance);
 
-// (입력 씹힘 방지 1) 콘솔에 동시 접근(출력/디버그)을 막기 위한 잠금 객체
+// 콘솔 충돌 방지 락
 object consoleLock = new();
 
-// C# 프로그램이 터미널에 '출력'할 때는 UTF-8을 사용하도록 강제
 Console.OutputEncoding = Encoding.UTF8;
 
 // ===================================================
 // UI/GAME STATE VARIABLES 
 // ===================================================
 string? globalNickname = string.Empty;
-
 string currentQuestioner = "미정";
 int currentTurn = 0; 
 int currentQuestionIndex = 0; 
 int myTotalScore = 0; 
 
-// 질문/답변 기록을 저장할 리스트: (질문자, 질문 내용, 답변 내용)
+// [핵심] 채팅 기록을 저장할 리스트 (화면 갱신 시 복구용)
+List<string> chatLogHistory = new List<string>();
+const int MaxChatHistory = 15; 
+
+// [핵심] 사용자가 현재 치고 있는 글자 버퍼
+StringBuilder inputBuffer = new StringBuilder();
+
 List<(string Questioner, string Question, string Answer)> qaHistory = new();
-
-// 현재 고개에서 '나'의 질문/답변을 임시로 저장 (qaHistory에 추가되기 전)
 (string Question, string Reply)? myCurrentQuestion = null;
-
-// 현재 고개에서 획득한 (내 질문 + 선택 질문) 기록을 임시 보관
 List<(string Questioner, string Question, string Answer)> currentGogaeHints = new();
 
-
 // ===================================================
-// 접속 정보 입력 (IP 및 닉네임) - 한글화 적용
+// 접속 정보 입력
 // ===================================================
+Console.Clear();
 Console.WriteLine("==============================================");
-Console.WriteLine("      [ 온라인 스무고개 클라이언트 접속 ]");
+Console.WriteLine("      [ 온라인 스무고개 클라이언트 ]");
 Console.WriteLine("==============================================");
 
-// 1. IP 입력 받기
-Console.WriteLine("접속할 서버의 IP를 입력하세요 (그냥 엔터치면 127.0.0.1):");
+Console.Write("접속할 서버 IP (기본값 127.0.0.1): ");
 string? inputIp = Console.ReadLine();
-// 공백 제거 및 기본값 설정
 string ip = string.IsNullOrWhiteSpace(inputIp) ? "127.0.0.1" : inputIp.Trim();
 
-// 2. 닉네임 입력 받기
-Console.WriteLine("사용할 닉네임을 입력하세요 (띄어쓰기 불가):");
+Console.Write("닉네임 입력 (띄어쓰기 불가): ");
 string? nicknameInput = Console.ReadLine();
-
 while (string.IsNullOrWhiteSpace(nicknameInput))
 {
-    Console.WriteLine("닉네임은 비어있을 수 없습니다. 다시 입력해주세요:");
+    Console.Write("닉네임을 입력해야 합니다: ");
     nicknameInput = Console.ReadLine();
 }
-globalNickname = nicknameInput.Trim(); // 공백 제거
+globalNickname = nicknameInput.Trim();
 
 // ===================================================
-// 서버 연결 시작
+// 서버 연결
 // ===================================================
 TcpClient client = new TcpClient();
 StreamReader? networkReader = null;
 StreamWriter? networkWriter = null;
-StreamReader? consoleInputReader = null;
 
 try
 {
-    SafeWriteLine($"서버({ip}:9000)에 연결 시도 중...");
+    Console.WriteLine($"서버({ip}:9000)에 연결 시도 중...");
     await client.ConnectAsync(ip, 9000);
-    SafeWriteLine("서버 연결 성공! (종료하려면 'exit' 또는 '/cls' 입력)");
+    Console.WriteLine("서버 연결 성공!");
 
     NetworkStream stream = client.GetStream();
-
     networkReader = new StreamReader(stream, Encoding.UTF8);
     networkWriter = new StreamWriter(stream, Encoding.UTF8) { AutoFlush = true };
-    consoleInputReader = new StreamReader(Console.OpenStandardInput(), Encoding.UTF8);
 
-    // 서버에 닉네임 전송
     await networkWriter.WriteLineAsync(globalNickname);
 
-    Task receiverTask = ReceiveMessagesAsync(networkReader, client);
-    Task senderTask = SendMessagesAsync(networkWriter, client, consoleInputReader);
+    // 비동기 태스크 시작
+    var receiverTask = ReceiveMessagesAsync(networkReader, client);
+    var senderTask = InputLoopAsync(networkWriter, client);
 
     await Task.WhenAny(receiverTask, senderTask);
 }
 catch (Exception ex)
 {
-    SafeWriteLine($"[오류 발생] 서버에 연결할 수 없습니다.");
-    SafeWriteLine($"에러 내용: {ex.Message}");
-    SafeWriteLine($"IP 주소({ip})가 정확한지 확인해주세요.");
+    Console.WriteLine($"[오류] {ex.Message}");
 }
 finally
 {
     client.Close();
     networkReader?.Close();
     networkWriter?.Close();
-    consoleInputReader?.Close();
 }
 
-
 // ===================================================
-// UI/UX FUNCTIONS 
+// UI 함수 
 // ===================================================
 
 /// <summary>
-/// 모든 콘솔 출력을 담당하는 함수 (출력 충돌 방지)
+/// 메시지를 받으면 기록에 저장하고 화면에 출력하는 함수
 /// </summary>
 void SafeWriteLine(string message)
 {
     lock (consoleLock)
     {
+        // 1. 채팅 기록 리스트에 추가
+        chatLogHistory.Add(message);
+        if (chatLogHistory.Count > MaxChatHistory) chatLogHistory.RemoveAt(0);
+
+        // 2. 현재 입력 중이던 줄 지우기
+        ClearCurrentInputLine();
+
+        // 3. 메시지 출력
         Console.WriteLine(message);
+
+        // 4. 입력 중이던 내용 복구
+        RedrawInputBuffer();
     }
 }
 
-/// <summary>
-/// 서버에서 온 메시지가 "단계 전환"을 의미하는지 검사
-/// </summary>
+void ClearCurrentInputLine()
+{
+    Console.SetCursorPosition(0, Console.CursorTop);
+    Console.Write(new string(' ', Console.WindowWidth - 1));
+    Console.SetCursorPosition(0, Console.CursorTop);
+}
+
+void RedrawInputBuffer()
+{
+    // 프롬프트 없이 내용만 출력
+    Console.Write(inputBuffer.ToString());
+}
+
 bool ShouldClearScreenFor(string msg)
 {
     if (msg.Contains("게임을 시작합니다!")) return true;
     if (msg.Contains("번째 턴을 시작합니다")) return true;
-    
-    // 'X번째 고개를 시작합니다' 메시지가 올 때 갱신 (기록 추가 후)
     if (msg.Contains("번째 고개를 시작합니다")) return true; 
-    
-    if (msg.Contains("모든 플레이어의 질문이 등록되었습니다")) return true;
-    if (msg.Contains("출제자가 모든 질문에 답변했습니다! 이제 힌트를 선택할 차례입니다")) return true;
-    if (msg.Contains("모든 플레이어가 힌트 선택을 완료했습니다!")) return true;
-    
-    // [최종 힌트] 블록 시작 시 갱신 조건은 제거됨 (다음 고개 시작 시 갱신)
-    
-    if (msg.Contains("5번의 고개가 모두 끝났습니다! 턴을 종료하고 점수를 계산합니다")) return true;
+    if (msg.Contains("모든 질문 등록 완료")) return true;
+    if (msg.Contains("답변 완료! 이제 힌트를 선택할 차례입니다")) return true;
+    if (msg.Contains("힌트 선택 완료! 정답 유추 단계입니다")) return true;
+    if (msg.Contains("5번의 고개가 모두 끝났습니다")) return true;
     if (msg.Contains("로비로 돌아왔습니다")) return true;
-
     return false;
 }
 
-/// <summary>
-/// 화면을 지우고 게임 상태를 표시합니다. (획득 점수 추가, 질문자 제거, 답변 통합 출력)
-/// </summary>
 void DrawTitleScreen()
 {
     lock (consoleLock)
     {
         Console.Clear();
 
-        // 상단 타이틀
         Console.WriteLine("==============================================");
         Console.WriteLine("          >> Battle 20 Questions <<           "); 
         Console.WriteLine("==============================================");
-
-        // 현재 진행 상황 및 나의 총점 표시
         Console.WriteLine($"  출제자 : {currentQuestioner}");
         Console.WriteLine($"  턴     : {currentTurn}번째 턴");
         Console.WriteLine($"  고개   : {currentQuestionIndex}번째 고개");
         Console.WriteLine($"  나의 총점: {myTotalScore}점");
         Console.WriteLine("==============================================");
-
-        // 지금까지 한 질문 / 답 
         Console.WriteLine("  --- 지금까지 한 질문 / 답 ---");
 
         if (qaHistory != null && qaHistory.Count > 0)
@@ -166,7 +161,6 @@ void DrawTitleScreen()
             int idx = 1;
             foreach (var qa in qaHistory)
             {
-                // 질문자 닉네임 제거 및 답변 통합 출력
                 Console.WriteLine($"    {idx}. Q: {qa.Question} (A: {qa.Answer})");
                 idx++;
             }
@@ -177,19 +171,23 @@ void DrawTitleScreen()
         }
 
         Console.WriteLine("  ------------------------------------------");
-
-        Console.WriteLine("[ 서버 메시지/채팅 ]");
+        Console.WriteLine("[ 채팅 기록 ]");
+        
+        // 채팅 기록 복구
+        foreach (var log in chatLogHistory)
+        {
+            Console.WriteLine(log);
+        }
+        
+        // 입력 중이던 내용 복구
+        RedrawInputBuffer();
     }
 }
 
-
 // ===================================================
-// ASYNC TASKS 
+// 비동기 작업
 // ===================================================
 
-/// <summary>
-/// 서버로부터 메시지를 '수신'하고 게임 상태를 업데이트하는 작업 전용 루프
-/// </summary>
 async Task ReceiveMessagesAsync(StreamReader networkReader, TcpClient client)
 {
     try
@@ -197,43 +195,35 @@ async Task ReceiveMessagesAsync(StreamReader networkReader, TcpClient client)
         while (client.Connected)
         {
             string? message = await networkReader.ReadLineAsync();
-            if (message == null)
-            {
-                SafeWriteLine("Server disconnected.");
-                break;
-            }
+            if (message == null) break;
 
-            // 1. 상태 변수 업데이트를 시도
             UpdateGameState(message);
             
-            // 2. 🔹 서버에서 온 메시지가 "단계 전환"이면 클라이언트가 스스로 화면 지우기 및 UI 갱신
             if (ShouldClearScreenFor(message))
             {
-                // UI 갱신 (DrawTitleScreen 내부에서 Console.Clear()와 lock 처리)
+                // 화면 갱신 시에도 기록은 저장해야 함
+                lock(consoleLock)
+                {
+                    chatLogHistory.Add(message);
+                    if (chatLogHistory.Count > MaxChatHistory) chatLogHistory.RemoveAt(0);
+                }
                 DrawTitleScreen();
-                // UI를 새로 그린 후, 전환 메시지도 표시해줍니다.
-                SafeWriteLine(message); 
             }
             else
             {
-                // 3. 일반 메시지 출력
                 SafeWriteLine(message); 
             }
         }
     }
     catch (Exception)
     {
-        SafeWriteLine("Connection lost.");
+        // 종료
     }
 }
 
-/// <summary>
-/// 서버 메시지를 분석하여 UI에 필요한 전역 변수를 업데이트합니다. 
-/// </summary>
 void UpdateGameState(string message)
 {
-    // A. 턴 시작 정보 파싱 (턴이 바뀔 때만 전체 초기화)
-    var turnMatch = Regex.Match(message, @"\[서버\] (\d+)번째 턴을 시작합니다\. 이번 출제자는 \[ (.+?) \]님입니다\.");
+    var turnMatch = Regex.Match(message, @"\[서버\] (\d+)번째 턴을 시작합니다\. 출제자: \[ (.+?) \]");
     if (turnMatch.Success)
     {
         currentTurn = int.Parse(turnMatch.Groups[1].Value);
@@ -245,11 +235,9 @@ void UpdateGameState(string message)
         return;
     }
     
-    // B. 고개 시작 정보 파싱 (이 시점에 이전 고개 기록을 qaHistory에 반영)
     var gogaeMatch = Regex.Match(message, @"(\d+)번째 고개를 시작합니다");
     if (gogaeMatch.Success)
     {
-        // 🚨 다음 고개 인덱스 업데이트 전에, 이전 고개의 기록을 qaHistory에 추가합니다.
         if (currentGogaeHints.Count > 0)
         {
             foreach (var hint in currentGogaeHints)
@@ -259,36 +247,20 @@ void UpdateGameState(string message)
                     qaHistory.Add(hint); 
                 }
             }
-            currentGogaeHints.Clear(); // 임시 저장소 비우기
+            currentGogaeHints.Clear();
         }
-
         currentQuestionIndex = int.Parse(gogaeMatch.Groups[1].Value);
         myCurrentQuestion = null;
         return;
     }
     
-    // C. 질문/답변 기록 업데이트 (내 질문/답변 수신 시, 임시 저장만)
-    // 서버가 "예/아니오"를 보내도 Regex (.+?)가 알아서 처리하므로 수정 불필요
     var myDataMatch = Regex.Match(message, @"\[내 질문\] \[(.+?)\]: (.+?) -> \((.+?)\)");
     if (myDataMatch.Success && myDataMatch.Groups[1].Value == globalNickname)
     {
-        string questioner = myDataMatch.Groups[1].Value;
-        string question = myDataMatch.Groups[2].Value;
-        string reply = myDataMatch.Groups[3].Value;
-        
-        myCurrentQuestion = (question, reply); 
-        
+        myCurrentQuestion = (myDataMatch.Groups[2].Value, myDataMatch.Groups[3].Value); 
         return;
     }
     
-    // D. 힌트 선택 목록 업데이트 (무시)
-    var otherChoiceMatch = Regex.Match(message, @"\d+\. \[(.+?)\]: (.+)");
-    if (otherChoiceMatch.Success)
-    {
-        return;
-    }
-    
-    // E. 최종 선택된 힌트 업데이트 (currentGogaeHints에 임시 저장)
     var finalChoiceMatch = Regex.Match(message, @"\[선택 질문\] \[(.+?)\]: (.+?) -> \((.+?)\)");
     if (finalChoiceMatch.Success)
     {
@@ -296,7 +268,6 @@ void UpdateGameState(string message)
         string question = finalChoiceMatch.Groups[2].Value;
         string reply = finalChoiceMatch.Groups[3].Value;
         
-        // 1. 내 질문을 임시 저장소에 추가
         if (myCurrentQuestion.HasValue)
         {
             var myQ = myCurrentQuestion.Value;
@@ -304,77 +275,115 @@ void UpdateGameState(string message)
             {
                 currentGogaeHints.Add((globalNickname!, myQ.Question, myQ.Reply));
             }
-            myCurrentQuestion = null; // 사용 후 초기화
+            myCurrentQuestion = null;
         }
 
-        // 2. 선택 질문을 임시 저장소에 추가
-        bool isMyQuestion = questioner == globalNickname;
-        
-        if (!isMyQuestion)
+        if (questioner != globalNickname)
         {
             if (!currentGogaeHints.Any(h => h.Questioner == questioner && h.Question == question))
             {
                 currentGogaeHints.Add((questioner, question, reply));
             }
         }
-        
         return;
     }
 
-    // 🚨 F. 턴 결과 및 점수 업데이트 파싱 (새로 추가)
-    // 예시: [결과] PlayerB: 마지막 라운드로부터 5라운드 연속 정답 유지! (+10점, 총 10점)
     var scoreMatch = Regex.Match(message, @"\[결과\] (\S+)(?:\s\(.+?\))?: .* 총 (\d+)점");
     if (scoreMatch.Success)
     {
-        // 캡처 그룹 1은 이제 순수한 닉네임('a' 또는 'b')만 담습니다.
         string nickname = scoreMatch.Groups[1].Value;
-        int totalScore = int.Parse(scoreMatch.Groups[2].Value); 
-        
-        // 내 닉네임과 일치하면 점수를 업데이트합니다.
         if (nickname == globalNickname)
         {
-            myTotalScore = totalScore;
+            myTotalScore = int.Parse(scoreMatch.Groups[2].Value);
         }
         return;
     }
 }
 
-
-/// <summary>
-/// 사용자 키보드 입력을 서버로 '전송'하는 작업 전용 루프
-/// </summary>
-async Task SendMessagesAsync(StreamWriter writer, TcpClient client, StreamReader consoleInputReader)
+// [핵심] ReadKey를 이용한 입력 루프 + 한글 지움 처리
+async Task InputLoopAsync(StreamWriter writer, TcpClient client)
 {
     try
     {
         while (client.Connected)
         {
-            string? message = await consoleInputReader.ReadLineAsync();
+            ConsoleKeyInfo keyInfo = Console.ReadKey(intercept: true);
 
-            if (string.IsNullOrWhiteSpace(message)) continue;
-
-            string lower = message.ToLower();
-
-            // 🔹 로컬에서만 화면 지우기: /cls 
-            if (lower == "/cls")
+            lock(consoleLock) 
             {
-                DrawTitleScreen();
-                continue;
+                // 1. 엔터 키 (전송)
+                if (keyInfo.Key == ConsoleKey.Enter)
+                {
+                    string message = inputBuffer.ToString();
+                    
+                    // 내가 쓴 글을 화면에서 지움 (중복 방지)
+                    ClearCurrentInputLine();
+                    
+                    if (!string.IsNullOrWhiteSpace(message))
+                    {
+                        if (message.ToLower() == "/cls")
+                        {
+                            DrawTitleScreen();
+                        }
+                        else if (message.ToLower() == "exit")
+                        {
+                            break; 
+                        }
+                        else
+                        {
+                            _ = writer.WriteLineAsync(message); 
+                        }
+                    }
+
+                    inputBuffer.Clear();
+                }
+                // 2. 백스페이스 (지우기)
+                else if (keyInfo.Key == ConsoleKey.Backspace)
+                {
+                    if (inputBuffer.Length > 0)
+                    {
+                        // 지우려는 마지막 글자를 가져옴
+                        char lastChar = inputBuffer[inputBuffer.Length - 1];
+                        
+                        // 그 글자의 화면 폭(1칸 혹은 2칸)을 계산
+                        int width = GetTextWidth(lastChar);
+
+                        // 버퍼에서 삭제
+                        inputBuffer.Length--;
+
+                        // 화면에서 삭제 (너비만큼 백스페이스)
+                        if (width == 2)
+                        {
+                            Console.Write("\b\b  \b\b"); // 한글: 2칸 뒤로 -> 공백 2개 -> 2칸 뒤로
+                        }
+                        else
+                        {
+                            Console.Write("\b \b");     // 영어: 1칸 뒤로 -> 공백 1개 -> 1칸 뒤로
+                        }
+                    }
+                }
+                // 3. 일반 문자 입력
+                else if (!char.IsControl(keyInfo.KeyChar))
+                {
+                    inputBuffer.Append(keyInfo.KeyChar);
+                    Console.Write(keyInfo.KeyChar);
+                }
             }
-
-            // SafeWriteLine($"[DEBUG] Sending: {message}"); // 디버그 필요시 주석 해제
-
-            if (lower == "exit")
-            {
-                break;
-            }
-
-            // 서버로 메시지 전송
-            await writer.WriteLineAsync(message);
         }
     }
     catch (Exception)
     {
-        SafeWriteLine("Failed to send message. Server may be down.");
+        // 종료
     }
+}
+
+// 글자가 화면에서 몇 칸을 차지하는지 계산하는 헬퍼 함수
+int GetTextWidth(char c)
+{
+    // 한글 범위 체크 (대략적인 범위)
+    if (c >= 0x2E80 || (c >= 0x1100 && c <= 0x11FF) || (c >= 0xAC00 && c <= 0xD7A3))
+    {
+        return 2; // 한글 등 전각 문자는 2칸
+    }
+    return 1; // 영어, 숫자, 특수기호는 1칸
 }
