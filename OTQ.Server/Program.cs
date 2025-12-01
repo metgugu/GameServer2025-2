@@ -71,9 +71,12 @@ async Task HandleClientAsync(Player player)
         Console.WriteLine($"Broadcasting: {joinMessage}"); 
         await BroadcastMessageAsync(joinMessage);
 
+        // [추가됨] 입장 시 현재 인원 알림
+        await BroadcastPlayerListAsync();
+
         if (player.IsHost)
         {
-            await SendMessageToAsync(player, "[서버] 당신은 방장입니다. 3~4명이 모이면 '/게임시작'을 입력하여 게임을 시작하세요.");
+            await SendMessageToAsync(player, "[서버] 당신은 방장입니다. 3~4명이 모이면 '/게임시작'을 입력하세요.");
         }
         else
         {
@@ -117,7 +120,7 @@ async Task HandleClientAsync(Player player)
     finally
     {
         // -----------------------------------------------------------
-        // [수정됨] 플레이어 퇴장 및 게임 강제 종료 로직
+        // 플레이어 퇴장 및 게임 강제 종료 로직
         // -----------------------------------------------------------
         players.Remove(player);
         player.Client.Close();
@@ -130,7 +133,15 @@ async Task HandleClientAsync(Player player)
         if (isGameRunning)
         {
             await BroadcastMessageAsync("[서버] 🚨 플레이어 이탈로 인해 게임을 강제 종료하고 로비로 돌아갑니다.");
-            ResetGameData(); // 게임 데이터 초기화 함수 호출
+            ResetGameData(); // 게임 데이터 초기화
+            
+            // [추가됨] 로비 복귀 후 남은 인원 알림
+            await BroadcastPlayerListAsync();
+        }
+        else
+        {
+            // 게임 중이 아닐 때도 누군가 나가면 남은 인원 갱신
+            await BroadcastPlayerListAsync();
         }
 
         // 2. 나간 사람이 방장이었다면 -> 다음 사람에게 방장 승계
@@ -140,6 +151,9 @@ async Task HandleClientAsync(Player player)
             newHost.IsHost = true;
             await SendMessageToAsync(newHost, "[서버] 👑 이전 방장이 퇴장하여 당신이 새로운 방장이 되었습니다! (/게임시작 가능)");
             await BroadcastMessageAsync($"[서버] {newHost.Nickname}님이 새로운 방장이 되었습니다.");
+            
+            // 방장이 바뀌었으니 인원 목록 다시 보여줌 (방장 표시 갱신)
+            await BroadcastPlayerListAsync();
         }
     }
 }
@@ -181,13 +195,25 @@ bool IsCommand(string message, out string content)
     return false;
 }
 
+// [추가됨] 현재 접속자 목록을 방송하는 함수
+async Task BroadcastPlayerListAsync()
+{
+    if (players.Count == 0) return;
+
+    var names = players.Select(p => p.Nickname + (p.IsHost ? "(방장)" : ""));
+    string listMsg = $"[서버] 현재 접속자 ({players.Count}명): {string.Join(", ", names)}";
+    await BroadcastMessageAsync(listMsg);
+}
+
 // ==================================================================================
 // [게임 로직 함수들]
 // ==================================================================================
 
 async Task HandleLobbyMessageAsync(Player player, string message)
 {
-    if (message.Trim() == "/게임시작")
+    string command = message.Trim();
+
+    if (command == "/게임시작")
     {
         if (!player.IsHost)
         {
@@ -215,6 +241,13 @@ async Task HandleLobbyMessageAsync(Player player, string message)
             
             await StartTurnAsync(); 
         }
+    }
+    // [추가됨] 인원 확인 명령어
+    else if (command == "/인원" || command == "/users")
+    {
+        var names = players.Select(p => p.Nickname + (p.IsHost ? "(방장)" : ""));
+        string listMsg = $"[서버] 현재 접속자 ({players.Count}명): {string.Join(", ", names)}";
+        await SendMessageToAsync(player, listMsg);
     }
     else
     {
@@ -652,6 +685,9 @@ async Task EndGameAsync()
     // 게임 리셋 (로비 복귀)
     ResetGameData();
     Console.WriteLine("[게임 로그] 로비 복귀.");
+    
+    // [추가됨] 게임 종료 후 로비 복귀 시에도 인원 목록 표시
+    await BroadcastPlayerListAsync();
 }
 
 async Task BroadcastMessageAsync(string message)
@@ -706,7 +742,7 @@ class Player
 {
     public TcpClient Client { get; }
     public string Nickname { get; set; }
-    // [수정됨] IsHost를 set 가능하게 변경하여 방장 승계 기능 지원
+    // IsHost를 set 가능하게 변경하여 방장 승계 기능 지원
     public bool IsHost { get; set; } 
     public int TotalScore { get; set; } = 0;
     public List<string> Guesses { get; } = new List<string>();
