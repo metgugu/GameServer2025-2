@@ -2,6 +2,7 @@
 using System.Text;
 using System.Text.RegularExpressions; 
 using System.Linq; 
+using System.Collections.Generic; // Dictionary를 위해 추가
 
 // 한글 깨짐 방지
 Encoding.RegisterProvider(CodePagesEncodingProvider.Instance);
@@ -20,6 +21,9 @@ int currentTurn = 0;
 int currentQuestionIndex = 0; 
 int myTotalScore = 0; 
 
+// 🚨 [순위표 추가] 모든 플레이어의 닉네임과 점수를 저장하는 딕셔너리
+Dictionary<string, int> allPlayerScores = new(); 
+
 // [핵심] 채팅 기록을 저장할 리스트 (화면 갱신 시 복구용)
 List<string> chatLogHistory = new List<string>();
 const int MaxChatHistory = 15; 
@@ -30,6 +34,7 @@ StringBuilder inputBuffer = new StringBuilder();
 List<(string Questioner, string Question, string Answer)> qaHistory = new();
 (string Question, string Reply)? myCurrentQuestion = null;
 List<(string Questioner, string Question, string Answer)> currentGogaeHints = new();
+
 
 // ===================================================
 // 접속 정보 입력
@@ -152,7 +157,33 @@ void DrawTitleScreen()
         Console.WriteLine($"  출제자 : {currentQuestioner}");
         Console.WriteLine($"  턴     : {currentTurn}번째 턴");
         Console.WriteLine($"  고개   : {currentQuestionIndex}번째 고개");
-        Console.WriteLine($"  나의 총점: {myTotalScore}점");
+        //Console.WriteLine($"  나의 총점: {myTotalScore}점"); //현재순위에 점수가 표시되어 비활성화
+        
+        // 🚨 순위표 섹션 시작
+        Console.WriteLine("----------------------------------------------");
+        Console.WriteLine("  --- 현재 순위 ---");
+        
+        var rankings = allPlayerScores.OrderByDescending(p => p.Value).ToList();
+        
+        if (rankings.Count > 0)
+        {
+            for (int i = 0; i < rankings.Count; i++)
+            {
+                var p = rankings[i];
+                string rankMark = (i == 0) ? "👑" : (i == 1) ? "🥈" : (i == 2) ? "🥉" : " ";
+                string isMe = (p.Key == globalNickname) ? " <--- YOU" : "";
+                
+                Console.WriteLine($"  {rankMark} {i + 1}. {p.Key}: {p.Value}점{isMe}");
+            }
+        }
+        else
+        {
+            Console.WriteLine("    (점수 정보 대기 중)");
+        }
+        
+        Console.WriteLine("----------------------------------------------");
+        // 🚨 순위표 섹션 끝
+        
         Console.WriteLine("==============================================");
         Console.WriteLine("  --- 지금까지 한 질문 / 답 ---");
 
@@ -288,9 +319,38 @@ void UpdateGameState(string message)
         return;
     }
 
+    // 🚨 [SCORES] 메시지 파싱 (G 섹션)
+    var allScoresMatch = Regex.Match(message, @"^\[SCORES\](.+)$"); 
+    if (allScoresMatch.Success)
+    {
+        string scoreList = allScoresMatch.Groups[1].Value;
+        allPlayerScores.Clear(); 
+        
+        string[] playerEntries = scoreList.Split(',');
+        foreach (var entry in playerEntries)
+        {
+            string[] parts = entry.Split(':');
+            if (parts.Length == 2 && int.TryParse(parts[1], out int score))
+            {
+                string nickname = parts[0];
+                allPlayerScores[nickname] = score;
+                
+                if (nickname == globalNickname)
+                {
+                    myTotalScore = score;
+                }
+            }
+        }
+        return;
+    }
+    
+    // F. 턴 결과 및 점수 업데이트 파싱 (나의 총점 업데이트는 G 섹션에서 처리되므로, 이 섹션은 보조 역할만 남깁니다.)
     var scoreMatch = Regex.Match(message, @"\[결과\] (\S+)(?:\s\(.+?\))?: .* 총 (\d+)점");
     if (scoreMatch.Success)
     {
+        // [SCORES] 메시지가 오지 않을 경우를 대비한 보험 코드로 유지하거나,
+        // 클라이언트 코드 간소화를 위해 이 섹션을 제거할 수도 있습니다.
+        // 여기서는 [SCORES] 메시지가 항상 온다고 가정하고 유지합니다.
         string nickname = scoreMatch.Groups[1].Value;
         if (nickname == globalNickname)
         {

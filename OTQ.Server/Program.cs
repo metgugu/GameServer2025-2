@@ -2,6 +2,7 @@ using System.Net;
 using System.Net.Sockets;
 using System.Text;
 using System.Linq; 
+using System.Collections.Generic; // Dictionary를 위해 추가
 
 // 콘솔 입출력 인코딩을 UTF-8로 강제 설정 (한글 깨짐 방지)
 Console.OutputEncoding = Encoding.UTF8;
@@ -179,6 +180,9 @@ void ResetGameData()
         p.AvailableChoices.Clear();
         p.ChosenQuestion = null;
     }
+    
+    // [추가됨] 로비 복귀 시, 모든 클라이언트에게 점수 0으로 갱신된 순위표를 전송
+    _ = BroadcastScoresAsync();
 }
 
 // ----------------------------------------------------------------------
@@ -235,6 +239,9 @@ async Task HandleLobbyMessageAsync(Player player, string message)
             
             // 점수 초기화
             foreach(var p in players) { p.TotalScore = 0; }
+            
+            // 🚨 추가: 게임 시작 시 순위표 0점으로 초기화하여 클라이언트 UI에 전송
+            await BroadcastScoresAsync();
 
             string startMessage = $"[서버] 게임을 시작합니다! (총 {players.Count}명)";
             await BroadcastMessageAsync(startMessage);
@@ -624,6 +631,10 @@ async Task EndTurnAndCalculateScoresAsync()
     await BroadcastMessageAsync("---------------------------------");
     
     currentTurnIndex++;
+    
+    // 🚨 추가: 점수 계산 후 모든 클라이언트에게 최신 점수판 브로드캐스트
+    await BroadcastScoresAsync(); 
+
     if (currentTurnIndex < players.Count)
     {
         await StartNextTurnAsync();
@@ -690,6 +701,35 @@ async Task EndGameAsync()
     await BroadcastPlayerListAsync();
 }
 
+// --- 유틸리티 함수 ---
+
+/// <summary>
+/// 현재 모든 플레이어의 닉네임과 점수를 클라이언트에게 전송합니다.
+/// </summary>
+async Task BroadcastScoresAsync()
+{
+    var rankedPlayers = players.OrderByDescending(p => p.TotalScore).ToList();
+    
+    // 메시지 형식: [SCORES]닉네임1:점수1,닉네임2:점수2,...
+    string scoreData = "[SCORES]";
+    
+    for (int i = 0; i < rankedPlayers.Count; i++)
+    {
+        var p = rankedPlayers[i];
+        scoreData += $"{p.Nickname}:{p.TotalScore},";
+    }
+    
+    if (scoreData.EndsWith(","))
+    {
+        scoreData = scoreData.TrimEnd(',');
+    }
+    
+    await BroadcastMessageAsync(scoreData);
+}
+
+/// <summary>
+/// 서버에 연결된 모든 플레이어에게 메시지를 전송합니다.
+/// </summary>
 async Task BroadcastMessageAsync(string message)
 {
     byte[] buffer = Encoding.UTF8.GetBytes(message + Environment.NewLine);
@@ -697,13 +737,13 @@ async Task BroadcastMessageAsync(string message)
     foreach (Player p in players.ToList()) 
     {
         try
-        {
-            if (p.Client.Connected)
             {
-                NetworkStream stream = p.Client.GetStream();
-                await stream.WriteAsync(buffer, 0, buffer.Length);
+                if (p.Client.Connected)
+                {
+                    NetworkStream stream = p.Client.GetStream();
+                    await stream.WriteAsync(buffer, 0, buffer.Length);
+                }
             }
-        }
         catch (Exception ex)
         {
             Console.WriteLine($"Error broadcasting to {p.Nickname}: {ex.Message}");
@@ -711,6 +751,9 @@ async Task BroadcastMessageAsync(string message)
     }
 }
 
+/// <summary>
+/// 특정 플레이어 1명에게만 1:1 메시지를 전송합니다.
+/// </summary>
 async Task SendMessageToAsync(Player player, string message)
 {
     byte[] buffer = Encoding.UTF8.GetBytes(message + Environment.NewLine);
