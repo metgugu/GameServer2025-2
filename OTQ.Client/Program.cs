@@ -32,22 +32,33 @@ List<(string Questioner, string Question, string Answer)> qaHistory = new();
 List<(string Questioner, string Question, string Answer)> currentGogaeHints = new();
 
 
-Console.WriteLine("Enter Server IP (default 127.0.0.1):");
-string ip = Console.ReadLine() ?? "127.0.0.1";
-if (string.IsNullOrWhiteSpace(ip))
-{
-    ip = "127.0.0.1";
-}
+// ===================================================
+// 접속 정보 입력 (IP 및 닉네임) - 한글화 적용
+// ===================================================
+Console.WriteLine("==============================================");
+Console.WriteLine("      [ 온라인 스무고개 클라이언트 접속 ]");
+Console.WriteLine("==============================================");
 
-Console.WriteLine("Enter your nickname(띄어쓰기불가능):");
+// 1. IP 입력 받기
+Console.WriteLine("접속할 서버의 IP를 입력하세요 (그냥 엔터치면 127.0.0.1):");
+string? inputIp = Console.ReadLine();
+// 공백 제거 및 기본값 설정
+string ip = string.IsNullOrWhiteSpace(inputIp) ? "127.0.0.1" : inputIp.Trim();
+
+// 2. 닉네임 입력 받기
+Console.WriteLine("사용할 닉네임을 입력하세요 (띄어쓰기 불가):");
 string? nicknameInput = Console.ReadLine();
+
 while (string.IsNullOrWhiteSpace(nicknameInput))
 {
-    Console.WriteLine("Nickname cannot be empty. Enter your nickname:");
+    Console.WriteLine("닉네임은 비어있을 수 없습니다. 다시 입력해주세요:");
     nicknameInput = Console.ReadLine();
 }
-globalNickname = nicknameInput;
+globalNickname = nicknameInput.Trim(); // 공백 제거
 
+// ===================================================
+// 서버 연결 시작
+// ===================================================
 TcpClient client = new TcpClient();
 StreamReader? networkReader = null;
 StreamWriter? networkWriter = null;
@@ -55,8 +66,9 @@ StreamReader? consoleInputReader = null;
 
 try
 {
+    SafeWriteLine($"서버({ip}:9000)에 연결 시도 중...");
     await client.ConnectAsync(ip, 9000);
-    SafeWriteLine("Connected to server! (Type 'exit' or /cls to quit)");
+    SafeWriteLine("서버 연결 성공! (종료하려면 'exit' 또는 '/cls' 입력)");
 
     NetworkStream stream = client.GetStream();
 
@@ -74,7 +86,9 @@ try
 }
 catch (Exception ex)
 {
-    SafeWriteLine($"Error: {ex.Message}");
+    SafeWriteLine($"[오류 발생] 서버에 연결할 수 없습니다.");
+    SafeWriteLine($"에러 내용: {ex.Message}");
+    SafeWriteLine($"IP 주소({ip})가 정확한지 확인해주세요.");
 }
 finally
 {
@@ -90,7 +104,7 @@ finally
 // ===================================================
 
 /// <summary>
-/// 모든 콘솔 출력을 담당하는 함수 (출력 충돌 방지 및 색상 제거)
+/// 모든 콘솔 출력을 담당하는 함수 (출력 충돌 방지)
 /// </summary>
 void SafeWriteLine(string message)
 {
@@ -134,7 +148,7 @@ void DrawTitleScreen()
 
         // 상단 타이틀
         Console.WriteLine("==============================================");
-        Console.WriteLine("          >> Battle 20 Questions <<          "); 
+        Console.WriteLine("          >> Battle 20 Questions <<           "); 
         Console.WriteLine("==============================================");
 
         // 현재 진행 상황 및 나의 총점 표시
@@ -254,6 +268,7 @@ void UpdateGameState(string message)
     }
     
     // C. 질문/답변 기록 업데이트 (내 질문/답변 수신 시, 임시 저장만)
+    // 서버가 "예/아니오"를 보내도 Regex (.+?)가 알아서 처리하므로 수정 불필요
     var myDataMatch = Regex.Match(message, @"\[내 질문\] \[(.+?)\]: (.+?) -> \((.+?)\)");
     if (myDataMatch.Success && myDataMatch.Groups[1].Value == globalNickname)
     {
@@ -347,7 +362,7 @@ async Task SendMessagesAsync(StreamWriter writer, TcpClient client, StreamReader
                 continue;
             }
 
-            SafeWriteLine($"[DEBUG] Sending: {message}");
+            // SafeWriteLine($"[DEBUG] Sending: {message}"); // 디버그 필요시 주석 해제
 
             if (lower == "exit")
             {
